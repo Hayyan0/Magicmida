@@ -1178,9 +1178,15 @@ var
   SiteAddr, Target, NumWritten: NativeUInt;
   SiteSet: TList<NativeUInt>;
   Site: array[0..5] of Byte;
-  IsJmp: Boolean;
+  IsJmp, Is5Byte: Boolean;
   IATData: array[0..2047] of NativeUInt;
   IATMap: TDictionary<NativeUInt, NativeUInt>;
+  TrampolineBuf: NativeUInt;
+  TrampolineOff: Integer;
+  TrampolineStub: packed record
+    FF25: Word;
+    Addr: Cardinal;
+  end;
 begin
   SiteSet := TList<NativeUInt>.Create;
   IATMap := TDictionary<NativeUInt, NativeUInt>.Create;
@@ -1197,16 +1203,23 @@ begin
   for i := 0 to High(IATData) do
     IATMap.AddOrSetValue(IATData[i], IAT + Cardinal(i) * 4);
 
+  TrampolineBuf := NativeUInt(VirtualAllocEx(FProcess.hProcess, nil,
+      SiteSet.Count * 6, MEM_COMMIT, PAGE_EXECUTE_READWRITE));
+  TrampolineOff := 0;
+
   IsJmp := False;
   Target := 0;
 
   for SiteAddr in SiteSet do
   begin
     RPM(SiteAddr, @Site, 6);
+
+    Is5Byte := False;
     if (Site[0] = $E8) or (Site[0] = $E9) then
     begin
       Target := PCardinal(@Site[1])^ + SiteAddr + 5;
       IsJmp := Site[0] = $E9;
+      Is5Byte := True;
     end
     else if (Site[1] = $E8) or (Site[1] = $E9) then
     begin
@@ -1226,11 +1239,28 @@ begin
       Continue;
     end;
 
-    // Turn the relative call/jmp into call/jmp dword ptr [iat]
-    Site[0] := $FF;
-    Site[1] := $15 + Ord(IsJmp) * $10;
-    PCardinal(@Site[2])^ := IATMap[Target];
-    WriteProcessMemory(FProcess.hProcess, Pointer(SiteAddr), @Site, 6, NumWritten)
+    if Is5Byte then
+    begin
+      TrampolineStub.FF25 := $25FF;
+      TrampolineStub.Addr := IATMap[Target];
+      WriteProcessMemory(FProcess.hProcess,
+          Pointer(TrampolineBuf + Cardinal(TrampolineOff)),
+          @TrampolineStub, 6, NumWritten);
+
+      Site[0] := $E8 + Ord(IsJmp);
+      PCardinal(@Site[1])^ :=
+          (TrampolineBuf + Cardinal(TrampolineOff)) - SiteAddr - 5;
+      WriteProcessMemory(FProcess.hProcess, Pointer(SiteAddr), @Site, 5, NumWritten);
+
+      Inc(TrampolineOff, 6);
+    end
+    else
+    begin
+      Site[0] := $FF;
+      Site[1] := $15 + Ord(IsJmp) * $10;
+      PCardinal(@Site[2])^ := IATMap[Target];
+      WriteProcessMemory(FProcess.hProcess, Pointer(SiteAddr), @Site, 6, NumWritten)
+    end;
   end;
 
   IATMap.Free;
