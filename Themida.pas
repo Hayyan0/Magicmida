@@ -1247,7 +1247,10 @@ begin
           Pointer(TrampolineBuf + Cardinal(TrampolineOff)),
           @TrampolineStub, 6, NumWritten);
 
-      Site[0] := $E8 + Ord(IsJmp);
+      if IsJmp then
+        Site[0] := $E9
+      else
+        Site[0] := $E8;
       PCardinal(@Site[1])^ :=
           (TrampolineBuf + Cardinal(TrampolineOff)) - SiteAddr - 5;
       WriteProcessMemory(FProcess.hProcess, Pointer(SiteAddr), @Site, 5, NumWritten);
